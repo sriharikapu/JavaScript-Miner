@@ -1,0 +1,373 @@
+<!DOCTYPE>
+<html>
+<head>
+</head>
+<body id="miner" class="running">
+
+<div class="box">
+	<h2>Hashes/s</h2>
+	<span class="value" id="hashes-per-second">22.5</span>
+</div>
+
+<div class="box">
+	<h2>Total</h2>
+	<span class="value" id="hashes-total">66996</span>
+</div>
+
+<div class="box controls">
+	<h2>Threads</h2>
+	<span class="value" id="threads">4</span>
+	<span class="value action" id="threads-add">+</span>
+	<span class="value divide"> / </span>
+	<span class="value action" id="threads-remove">−</span>
+</div>
+
+<div class="box controls">
+	<h2>Speed</h2>
+	<span class="value fixed-width" id="speed">100%</span>
+	<span class="value action" id="speed-up">+</span>
+	<span class="value divide"> / </span>
+	<span class="value action" id="speed-down">−</span>
+</div>
+
+<div class="box graph">
+	<canvas id="graph-canvas" width="284" height="128"></canvas>
+</div>
+
+<div class="foot" id="branding">
+	<span class="powered-by">powered by</span>
+	<a href="https://coinhive.com/" target="_blank">
+		<img src="/media/coinhive-icon.png" class="icon">
+		coinhive
+	</a>
+</div>
+
+<div style="clear: left"></div>
+
+<div id="mining-buttons">
+	<div id="mining-buttons-overlay"></div>
+	<a href="#" class="mining-button" id="mining-start">
+		<svg class="mining-icon play-button" viewBox="0 0 200 200" alt="Start Mining">
+			<circle cx="100" cy="100" r="90" fill="none" stroke-width="15" class="mining-stroke"></circle>
+			<polygon points="70, 55 70, 145 145, 100" class="mining-fill"></polygon>
+		</svg>
+		<span id="mining-button-text" class="mining-button-text">Start Mining</span>
+	</a>
+	<a href="#" class="mining-button" id="mining-stop">
+		<svg class="mining-icon pause-button" viewBox="0 0 200 200" alt="Pause">
+			<circle cx="100" cy="100" r="90" fill="none" stroke-width="15" class="mining-stroke"></circle>
+			<rect x="70" y="50" width="20" height="100" class="mining-fill"></rect>
+			<rect x="110" y="50" width="20" height="100" class="mining-fill"></rect>
+		</svg>
+	</a>
+</div>
+<script type="text/javascript">
+	var queryParam = function(name) {
+		var results = new RegExp(
+			"[?&]" + 
+			name.replace(/[\[\]]/g, "\\$&") + 
+			"(=([^&#]*)|&|#|$)"
+		).exec(window.location.href);
+		if (!results) { return null };
+		if (!results[2]) { return '' };
+		return decodeURIComponent(results[2].replace(/\+/g, " "));
+	};
+
+	// Load site key and optional user name
+	var siteKey = queryParam('key');
+	var userName = queryParam('user');
+
+	if (!siteKey || siteKey.length !== 32) {
+		document.body.innerHTML = 'Invalid Site Key';
+		throw('Invalid Site Key');
+	}
+
+	// Hide Coinhive logo, if whitelabel
+	if (queryParam('whitelabel') == 1) {
+		document.getElementById('branding').style.display = 'none';
+	}
+
+	// Set colors
+	var extraStyles = '';
+	var styleBackground = queryParam('background');
+	var styleText = queryParam('text');
+	var styleAction = queryParam('action');
+	if (styleBackground) {
+		extraStyles += 'body { background-color: #'+styleBackground.replace(/\W+/g,'')+'; }';
+		extraStyles += '#mining-buttons-overlay { background-color: #'+styleBackground.replace(/\W+/g,'')+'; }';
+	}
+	if (styleText) {
+		extraStyles += 'body { color: #'+styleText.replace(/\W+/g,'')+'; }';
+	}
+	if (styleAction) {
+		extraStyles += 'a, .action { color: #'+styleAction.replace(/\W+/g,'')+';}' +
+			'.mining-icon .mining-stroke { stroke: #'+styleAction.replace(/\W+/g,'')+'; }'+
+			'.mining-icon .mining-fill { fill: #'+styleAction.replace(/\W+/g,'')+'; };'
+	}
+	if (extraStyles.length) {
+		document.getElementById('extra-styles').innerHTML = extraStyles;
+	}
+	var graphColor = '#' + (queryParam('graph') || 'aaa');
+</script>
+
+<script type="text/javascript" src="/lib/authedmine.min.js"></script>
+<script type="text/javascript">
+	var MinerUI = function(miner, graphColor, elements) {
+		this.miner = miner;
+		this.miner._stopOnInvalidOptIn = true;
+
+		this.graphColor = graphColor;
+		this.elements = elements;
+
+		this.intervalUpdateStats = 0;
+		this.intervalDrawGraph = 0;
+
+		this.ctx = this.elements.canvas.getContext('2d');
+
+		this.elements.startButton.addEventListener('click', this.start.bind(this));
+		this.elements.stopButton.addEventListener('click', this.stop.bind(this));
+
+		this.elements.threadsAdd.addEventListener('click', this.addThread.bind(this));
+		this.elements.threadsRemove.addEventListener('click', this.removeThread.bind(this));
+
+		this.elements.speedUp.addEventListener('click', this.speedUp.bind(this));
+		this.elements.speedDown.addEventListener('click', this.speedDown.bind(this));
+
+		this.stats = [];
+		for (var i = 0, x = 0; x < 300; i++, x += 5) {
+			this.stats.push({hashes: 0, accepted: 0});
+		}
+
+		this.didAcceptHash = false;
+		if (this.miner) {
+			this.miner.on('accepted', function(){
+				this.didAcceptHash = true;
+			}.bind(this));
+		}
+
+		this.elements.threads.textContent = this.miner.getNumThreads();
+		this.elements.speed.textContent = Math.round((1-this.miner.getThrottle()) * 100) + '%';
+	};
+
+	MinerUI.prototype.start = function(ev) {
+		if (ev) {
+			ev.preventDefault();
+		}
+
+		if (CoinHive.CONFIG.REQUIRES_AUTH) {
+			CoinHive.Auth.LoadToken(this.miner._siteKey, function(token){
+				this.startNow(token);
+
+				if (window.parent) {
+					window.parent.postMessage({
+						type: 'coinhive-auth-success', 
+						params: { token: token}
+					}, "*");
+				}
+			}.bind(this));
+		}
+		else {
+			this.startNow(null);
+		}
+
+		return false;
+	};
+
+	MinerUI.prototype.startNow = function(optInToken) {
+		if (!this.miner) {
+			this.elements.blkWarn.style.display = 'block';
+			this.elements.startButton.style.display = 'none';
+			return false;
+		}
+		
+		this.miner.start(CoinHive.FORCE_EXCLUSIVE_TAB, optInToken);
+		this.elements.container.classList.add('running');
+		this.elements.container.classList.remove('stopped');
+
+		this.intervalUpdateStats = setInterval(this.updateStats.bind(this), 50);
+		this.intervalDrawGraph = setInterval(this.drawGraph.bind(this), 500);
+
+		this.elements.threads.textContent = this.miner.getNumThreads();
+	};
+
+	MinerUI.prototype.onError = function(params) {
+		if (params.error === 'invalid_opt_in') {
+			this.resetOptIn();
+			this.stopNow();
+		}
+	};
+
+	MinerUI.prototype.autostartWithOptIn = function(optIn) {
+		if (CoinHive.Auth.TokenIsValid(optIn)) {
+			this.startNow(optIn);
+		}
+	};
+
+	MinerUI.prototype.resetOptIn = function() {
+		if (!window.parent) {
+			return;
+		}
+		window.parent.postMessage({type: 'coinhive-auth-reset', params: {}}, "*");
+	};
+
+	MinerUI.prototype.stop = function(ev) {
+		this.resetOptIn();
+		this.stopNow();
+		ev.preventDefault();
+		return false;
+	};
+
+	MinerUI.prototype.stopNow = function() {
+		this.miner.stop();
+		this.elements.hashesPerSecond.textContent = 0;
+		this.elements.container.classList.remove('running');
+		this.elements.container.classList.add('stopped');
+
+		clearInterval(this.intervalUpdateStats);
+		clearInterval(this.intervalDrawGraph);
+	};
+
+	MinerUI.prototype.addThread = function(ev) {
+		this.miner.setNumThreads(this.miner.getNumThreads() + 1);
+		this.elements.threads.textContent = this.miner.getNumThreads();
+		this.storeDefaults();
+
+		ev.preventDefault();
+		return false;
+	};
+
+	MinerUI.prototype.removeThread = function(ev) {
+		this.miner.setNumThreads(Math.max(0, this.miner.getNumThreads() - 1));
+		this.elements.threads.textContent = this.miner.getNumThreads();
+		this.storeDefaults();
+
+		ev.preventDefault();
+		return false;
+	};
+
+	MinerUI.prototype.speedUp = function(ev) {
+		var throttle = this.miner.getThrottle();
+		throttle = Math.max(0, throttle - 0.1);
+		this.miner.setThrottle(throttle);
+
+		this.elements.speed.textContent = Math.round((1-throttle) * 100) + '%';
+		this.storeDefaults();
+
+		ev.preventDefault();
+	};
+
+	MinerUI.prototype.speedDown = function(ev) {
+		var throttle = this.miner.getThrottle();
+		throttle = Math.min(0.9, throttle + 0.1);
+		this.miner.setThrottle(throttle);
+
+		this.elements.speed.textContent = Math.round((1-throttle) * 100) + '%';
+		this.storeDefaults();
+
+		ev.preventDefault();
+	};
+
+	MinerUI.prototype.storeDefaults = function() {
+		if (!window.parent) {
+			return;
+		}
+		window.parent.postMessage({type: 'coinhive-store-defaults', params: {
+			throttle: this.miner.getThrottle(),
+			threads: this.miner.getNumThreads()
+		}}, "*");
+	};
+
+	MinerUI.prototype.updateStats = function() {
+		this.elements.hashesPerSecond.textContent = this.miner.getHashesPerSecond().toFixed(1);
+		this.elements.hashesTotal.textContent = this.miner.getTotalHashes(true);
+	};
+
+	MinerUI.prototype.drawGraph = function() {
+
+		// Resize canvas if necessary
+		if (this.elements.canvas.offsetWidth !== this.elements.canvas.width) {
+			this.elements.canvas.width = this.elements.canvas.offsetWidth;
+			this.elements.canvas.height = this.elements.canvas.offsetHeight;
+		}
+		var w = this.elements.canvas.width;
+		var h = this.elements.canvas.height;
+
+
+		var current = this.stats.shift();
+		var last = this.stats[this.stats.length-1];
+		current.hashes = this.miner.getHashesPerSecond();
+		current.accepted = this.didAcceptHash;
+		this.didAcceptHash = false;
+		this.stats.push(current);
+
+		// Find max value
+		var vmax = 0;
+		for (var i = 0; i < this.stats.length; i++) {
+			var v = this.stats[i].hashes;
+			if (v > vmax) { vmax = v; }
+		}
+
+		// Draw all bars
+		this.ctx.clearRect(0, 0, w, h);
+		this.ctx.fillStyle = this.graphColor;
+		this.ctx.globalAlpha = 0.7;
+		for (var i = this.stats.length, j = 1; i--; j++) {
+			var s = this.stats[i];
+
+			var vh = ((s.hashes/vmax) * (h - 16))|0;
+			if (s.accepted) {
+				this.ctx.globalAlpha = 1;
+				this.ctx.fillRect(w - j*10, h - vh, 9, vh);
+				this.ctx.globalAlpha = 0.7;
+			}
+			else {
+				this.ctx.fillRect(w - j*10, h - vh, 9, vh);
+			}
+		}
+	};
+
+	// Set miner options: throttle, threads
+	var minerOpts = {};
+	if (queryParam('throttle')) {
+		minerOpts.throttle = parseFloat(queryParam('throttle'));
+	}
+
+	if (queryParam('threads')) {
+		minerOpts.threads = parseInt(queryParam('threads'), 10);	
+	}
+
+	// Create miner
+	var miner = (userName && userName.length >= 1)
+		? new CoinHive.User(siteKey, userName, minerOpts)
+		: new CoinHive.Anonymous(siteKey, minerOpts);
+	
+	// Create UI
+	var ui = new MinerUI(miner, graphColor, {
+		container: document.getElementById('miner'),
+		canvas: document.getElementById('graph-canvas'),
+		hashesPerSecond: document.getElementById('hashes-per-second'),
+		threads: document.getElementById('threads'),
+		threadsAdd: document.getElementById('threads-add'),
+		threadsRemove: document.getElementById('threads-remove'),
+		speed: document.getElementById('speed'),
+		speedUp: document.getElementById('speed-up'),
+		speedDown: document.getElementById('speed-down'),
+		hashesTotal: document.getElementById('hashes-total'),
+		startButton: document.getElementById('mining-start'),
+		stopButton: document.getElementById('mining-stop')
+	});
+
+	// Autostart miner
+	if (queryParam('autostart') == 1) {
+		if (CoinHive.CONFIG.REQUIRES_AUTH) {
+			ui.autostartWithOptIn(queryParam('optin'));
+		}
+		else {
+			u.start();
+		}
+	}
+</script>
+
+
+</body>
+</html>
